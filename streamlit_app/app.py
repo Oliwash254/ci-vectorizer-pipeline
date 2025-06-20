@@ -7,8 +7,13 @@ import tempfile
 import traceback
 import io # Import io for byte stream handling
 import sys
+from pathlib import path
 
-sys.path.append(str(Path(__file__).resolve().parent.parent / "src"))
+src_path = Path(os.getcwd()) / "src"
+if src_path.exists():
+    sys.path.append(str(src_path))
+else:
+    print(f"[ERROR] Couldn't find src path at: {src_path}")
 
 # --- IMPORTANT: Troubleshooting "RuntimeError: dictionary changed size during iteration" ---
 # This error often occurs due to a race condition in Streamlit's file watcher (watchdog).
