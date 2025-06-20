@@ -52,7 +52,7 @@ Edit
 
 ## 🛠️ Installation
 
-```bash
+```
 # Clone the repository
 git clone https://github.com/Oliwash254/ci-vectorizer-pipeline.git
 cd ci-vectorizer-pipeline
@@ -63,11 +63,9 @@ venv\Scripts\activate        # On Windows
 
 # Install dependencies
 pip install -r requirements.txt
-⚙️ Usage
-1. Run the processing pipeline manually:
-bash
-Copy
-Edit
+# ⚙️ Usage
+# 1. Run the processing pipeline manually:
+
 python src/ci_processor/main_pipeline.py \
   --input_path "path/to/your.zip" \
   --output "output/ci_library.zarr"
@@ -77,10 +75,7 @@ Automatically matches .wav files by similarity.
 
 Saves waveform/electrodogram previews in output/plots/.
 
-2. Launch the Streamlit app:
-bash
-Copy
-Edit
+# 2. Launch the Streamlit app:
 streamlit run streamlit_app/app.py
 You can:
 
@@ -92,9 +87,9 @@ Download pulse arrays as .npz
 
 Upload new recordings (auto-runs pipeline)
 
-📊 Electrodogram Example
+# 📊 Electrodogram Example
 
-📁 Data Format
+# 📁 Data Format
 Each segment is processed into Zarr arrays:
 
 pulse_times: 1D float array
@@ -114,13 +109,13 @@ AB and Cochlear differ in polarity, symmetry, and interphase gap handling.
 
 Uses oversampling and interpolation to align pulse shapes.
 
-📄 License
+# 📄 License
 This project is part of a bachelor's thesis and is open for academic collaboration. You may use, adapt, or extend the code with attribution.
 
-👤 Author
+# 👤 Author
 Oliver Shaban — GitHub @Oliwash254
 
-🧠 Future Work
+# 🧠 Future Work
 Add support for multi-wav per session
 
 Waveform alignment with pulses
