@@ -6,6 +6,9 @@ import os
 import tempfile
 import traceback
 import io # Import io for byte stream handling
+import sys
+
+sys.path.append(str(Path(__file__).resolve().parent.parent / "src"))
 
 # --- IMPORTANT: Troubleshooting "RuntimeError: dictionary changed size during iteration" ---
 # This error often occurs due to a race condition in Streamlit's file watcher (watchdog).
