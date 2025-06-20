@@ -32,9 +32,6 @@ CI_library_project/
 ├── .gitignore
 └── README.md # ← You are here
 
-yaml
-Copy
-Edit
 
 ---
 
@@ -60,6 +57,9 @@ cd ci-vectorizer-pipeline
 # Create and activate virtual environment
 python -m venv venv
 venv\Scripts\activate        # On Windows
+On macOS/Linux:
+python3 -m venv venv
+source venv/bin/activate     #On macOS/Linux
 
 # Install dependencies
 pip install -r requirements.txt
