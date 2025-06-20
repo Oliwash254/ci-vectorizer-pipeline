@@ -1,0 +1,102 @@
+# === Python cache ===
+__pycache__/
+*.py[cod]
+*.so
+
+# === Virtual environments ===
+venv/
+.venv/
+ENV/
+env/
+env.bak/
+.venv/
+.vscode/
+.idea/
+
+# === Dataset folders ===
+data/
+output/
+TESTING DATA/
+scripts/TESTING DATA/
+**/Recordings_*/
+**/Recordings_AB*/
+**/Recordings_Cochlear*/
+**/Emotionally expressive speech (EmoHI)*/
+**/*.zip
+
+# === Common large data files ===
+*.zarr
+*.npz
+*.npy
+*.h5
+*.hdf5
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.parquet
+*.feather
+*.pkl
+*.pickle
+*.joblib
+*.tar.gz
+*.gz
+*.bz2
+*.7z
+*.rar
+*.bin
+
+# === Trained models ===
+*.pb
+*.h5
+*.onnx
+*.tflite
+*.pt
+*.pth
+*.ckpt
+
+# === Jupyter notebooks ===
+*.ipynb
+.ipynb_checkpoints/
+
+# === Logs and debugging ===
+*.log
+matching_log.txt
+
+# === Installer/build artifacts ===
+dist/
+build/
+*.egg-info/
+pip-wheel-metadata/
+*.whl
+
+# === Streamlit cache ===
+.streamlit/
+.streamlit/config.toml
+
+# === Secrets ===
+.env
+.env.*
+
+# === OS system files ===
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# === Editor folders ===
+*.swp
+*.swo
+*.bak
+*.tmp
+
+# === Git Large File Storage ===
+.lfsconfig
+*.lfs*
+
+# === Safety net (catch any very large files accidentally generated) ===
+*.[Tt]esting*
+*/*.[Tt]esting*
+*/*.[Tt]ESTING*
+*/*.BACKUP*
+*/*.bak*

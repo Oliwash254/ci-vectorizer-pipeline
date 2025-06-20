@@ -1,0 +1,20 @@
+numpy>=1.24.0
+scipy>=1.10.0
+pandas>=1.5.0
+matplotlib>=3.6.0
+plotly>=5.13.0
+zarr>=2.14.0
+soundfile>=0.12.1
+sounddevice>=0.4.6
+streamlit>=1.30.0
+streamlit-extras>=0.3.4
+scikit-learn>=1.3.0
+tqdm>=4.65.0
+python-dotenv>=1.0.0
+watchdog>=3.0.0
+# For working with audio formats like .flac
+ffmpeg-python>=0.2.0
+
+# For waveform inspection, debugging
+ipython>=8.0.0
+jupyterlab>=4.0.0
