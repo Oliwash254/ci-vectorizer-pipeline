@@ -7,7 +7,7 @@ import tempfile
 import traceback
 import io # Import io for byte stream handling
 import sys
-from pathlib import path
+from pathlib import Path
 
 src_path = Path(os.getcwd()) / "src"
 if src_path.exists():
