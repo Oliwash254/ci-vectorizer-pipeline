@@ -32,10 +32,12 @@ else:
 # --- End Troubleshooting Guide ---
 
 
+
+
+
 # Import functions from your ci_processor library
-# This assumes ci_processor is correctly installed in your venv (pip install -e .)
 try:
-    from ci_processor.ci_vectorization.npdict import zip_to_npdict
+    from ci_processor.ci_vectorization.npdict import zip_to_npdict, folder_to_npdict # Keep folder_to_npdict for completeness
     from ci_processor.ci_vectorization.vectorizers import get_vectorizer
     from ci_processor.electrodogram import plot_electrodogram
     from ci_processor.ci_vectorization.vectorizers import SYSTEM_COCHLEAR # For clarity on system type comparison
@@ -53,14 +55,18 @@ def detect_system_type(file_path):
     Detect CI system type from the file path string.
     Expects 'cochlear' or 'ab' to be present in the lowercased path.
     """
-    file_path_lower = str(file_path).lower()
-    if "cochlear" in file_path_lower:
+    # This function now takes a general file_path (can be zip or a recording ID name)
+    # If it's a recording ID name, we might not have 'cochlear'/'ab' easily,
+    # so we might need a more robust way to get system_type from metadata later.
+    # For now, it works if the original zip/folder name contained it.
+    path_lower = str(file_path).lower()
+    if "cochlear" in path_lower:
         return "cochlear"
-    elif "ab" in file_path_lower:
+    elif "ab" in path_lower:
         return "ab"
     else:
-        st.warning("Could not reliably detect system type from file name. Defaulting to 'ab'. "
-                   "Please ensure 'cochlear' or 'ab' is in your ZIP file name for auto-detection.")
+        st.warning("Could not reliably detect system type from file name/ID. Defaulting to 'ab'. "
+                   "For best results, ensure 'cochlear' or 'ab' is in your recording's name.")
         return "ab"
 
 
@@ -69,14 +75,18 @@ st.set_page_config(layout="wide", page_title="CI Electrodogram Visualizer")
 
 st.title("🦻 CI Electrodogram Visualizer")
 st.markdown("""
-Upload your CI recording `.zip` file (containing `rec` and `__info__` folders, and optionally `.wav` files)
-to visualize electrodograms, view metadata, and download processed data.
+Choose an input method to visualize CI electrodograms, view metadata, and download processed data.
 """)
 
 # Initialize session state for storing data and plot data
 if 'app_state' not in st.session_state:
     st.session_state.app_state = {
-        'dat': None,
+        'input_method': 'Upload ZIP File', # Default input method
+        'zarr_root_path': '',
+        'dat': None, # This will be the npdict when loading from ZIP, or None when loading from Zarr
+        'zarr_store_obj': None, # The opened root Zarr store object when loading from Zarr
+        'recording_ids': [], # List of recording IDs found in the Zarr store
+        'selected_recording_id': None,
         'system_type': None,
         'segment_keys': [],
         'selected_segment_key': None,
@@ -89,103 +99,203 @@ if 'app_state' not in st.session_state:
         'uploaded_file_name': None
     }
 
-uploaded_file = None # Initialize uploaded_file to None by default
+# Input Method Selection
+st.session_state.app_state['input_method'] = st.radio(
+    "Select Input Method:",
+    ['Upload ZIP File', 'Load from Local Zarr Library'],
+    index=0 if st.session_state.app_state['input_method'] == 'Upload ZIP File' else 1,
+    key='input_method_radio'
+)
 
-# Conditional rendering of file_uploader
-if st.session_state.app_state['dat'] is None:
-    # Display the file uploader only if no data has been loaded yet
-    uploaded_file = st.file_uploader("Upload CI Recording ZIP File", type="zip", key="main_file_uploader")
-else:
-    # If data is already loaded, show a button to clear and upload a new file
-    st.sidebar.markdown("---")
-    if st.sidebar.button("Upload New ZIP File", key="clear_upload_button"):
-        # Clear all relevant session state to reset the app
-        st.session_state.app_state = {
-            'dat': None, 'system_type': None, 'segment_keys': [],
-            'selected_segment_key': None, 'plot_image_bytes': None,
-            'audio_file_path': None, 'download_pulse_times': None,
-            'download_pulse_amplitudes': None, 'download_pulse_parameters': None,
-            'temp_dir': None, 'uploaded_file_name': None
-        }
-        st.rerun() # Rerun to show the file uploader again
+# --- Logic for "Upload ZIP File" ---
+uploaded_file = None
+if st.session_state.app_state['input_method'] == 'Upload ZIP File':
+    if st.session_state.app_state['dat'] is None or st.session_state.app_state['zarr_store_obj'] is not None:
+        # Show uploader if no data loaded OR if previously loaded from Zarr (and now switching back)
+        uploaded_file = st.file_uploader("Upload CI Recording ZIP File", type="zip", key="main_file_uploader")
+    else:
+        # If data is already loaded from ZIP, show a button to clear and upload new
+        st.sidebar.markdown("---")
+        if st.sidebar.button("Upload New ZIP File", key="clear_upload_button_zip"):
+            # Clear all relevant session state to reset the app
+            st.session_state.app_state = {k: None if k not in ['input_method', 'zarr_root_path'] else st.session_state.app_state[k] for k in st.session_state.app_state}
+            st.session_state.app_state['input_method'] = 'Upload ZIP File' # Ensure correct method is set
+            st.rerun()
 
-# Handle file upload logic (this part remains similar, but now depends on the conditionally rendered uploaded_file)
-if uploaded_file is not None:
-    # This block now only executes when a file is freshly uploaded
-    # It will not execute on subsequent reruns unless 'dat' is cleared and a new file is chosen.
+    if uploaded_file is not None:
+        # This block executes when a file is freshly uploaded (not on subsequent reruns of the same file)
+        # Check if this is a new upload or rerun of the same file
+        if st.session_state.app_state['uploaded_file_name'] != uploaded_file.name or st.session_state.app_state['dat'] is None:
+            
+            # Clear previous temp_dir if it exists and is not None
+            if st.session_state.app_state['temp_dir'] and os.path.exists(st.session_state.app_state['temp_dir']):
+                import shutil
+                try:
+                    shutil.rmtree(st.session_state.app_state['temp_dir'])
+                except OSError as e:
+                    st.warning(f"Could not remove old temporary directory: {e}. It might be in use.")
+                st.session_state.app_state['temp_dir'] = None
 
-    # Ensure temp_dir is managed properly
-    if st.session_state.app_state['temp_dir'] and os.path.exists(st.session_state.app_state['temp_dir']):
-        import shutil
-        try:
-            shutil.rmtree(st.session_state.app_state['temp_dir'])
-            st.session_state.app_state['temp_dir'] = None
-        except OSError as e:
-            st.warning(f"Could not remove old temporary directory: {e}. It might be in use.")
+            temp_dir_obj = tempfile.TemporaryDirectory()
+            st.session_state.app_state['temp_dir'] = temp_dir_obj.name
+            st.session_state.app_state['uploaded_file_name'] = uploaded_file.name
+            
+            zip_path = os.path.join(st.session_state.app_state['temp_dir'], uploaded_file.name)
+            with open(zip_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
 
-    temp_dir_obj = tempfile.TemporaryDirectory()
-    st.session_state.app_state['temp_dir'] = temp_dir_obj.name
-    st.session_state.app_state['uploaded_file_name'] = uploaded_file.name
-    
-    zip_path = os.path.join(st.session_state.app_state['temp_dir'], uploaded_file.name)
-    with open(zip_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
+            st.success(f"File '{uploaded_file.name}' uploaded successfully! Extracting contents...")
 
-    st.success(f"File '{uploaded_file.name}' uploaded successfully! Extracting contents...")
+            try:
+                with zipfile.ZipFile(zip_path, 'r') as zf:
+                    zf.extractall(st.session_state.app_state['temp_dir'])
+                st.info(f"ZIP contents extracted to: {st.session_state.app_state['temp_dir']}")
 
-    try:
-        with zipfile.ZipFile(zip_path, 'r') as zf:
-            zf.extractall(st.session_state.app_state['temp_dir'])
-        st.info(f"ZIP contents extracted to: {st.session_state.app_state['temp_dir']}")
+                st.session_state.app_state['dat'] = zip_to_npdict(zip_path, prefer_unzipped=True)
+                st.session_state.app_state['zarr_store_obj'] = None # Clear Zarr store if switching to ZIP
+                st.session_state.app_state['system_type'] = detect_system_type(uploaded_file.name)
+                st.session_state.app_state['recording_ids'] = [] # Not applicable for direct ZIP load
+                st.session_state.app_state['selected_recording_id'] = None
+                
+                if 'rec' in st.session_state.app_state['dat'] and st.session_state.app_state['dat']['rec']:
+                    st.session_state.app_state['segment_keys'] = list(st.session_state.app_state['dat']['rec'].keys())
+                    st.session_state.app_state['selected_segment_key'] = st.session_state.app_state['segment_keys'][0] if st.session_state.app_state['segment_keys'] else None
+                else:
+                    st.session_state.app_state['segment_keys'] = []
+                    st.session_state.app_state['selected_segment_key'] = None
+                    st.error("No recording segments found in the 'rec' folder of the ZIP file.")
+                
+                # Reset plot and download data when new file is uploaded
+                st.session_state.app_state['plot_image_bytes'] = None
+                st.session_state.app_state['download_pulse_times'] = None
+                st.session_state.app_state['download_pulse_amplitudes'] = None
+                st.session_state.app_state['download_pulse_parameters'] = None
+                st.session_state.app_state['audio_file_path'] = None
+                
+                st.rerun() # Rerun to properly display data after initial upload processing
 
-        st.session_state.app_state['dat'] = zip_to_npdict(zip_path, prefer_unzipped=True)
-        st.session_state.app_state['system_type'] = detect_system_type(uploaded_file.name)
-
-        if 'rec' in st.session_state.app_state['dat'] and st.session_state.app_state['dat']['rec']:
-            st.session_state.app_state['segment_keys'] = list(st.session_state.app_state['dat']['rec'].keys())
-            st.session_state.app_state['selected_segment_key'] = st.session_state.app_state['segment_keys'][0] if st.session_state.app_state['segment_keys'] else None
+            except Exception as e:
+                st.error(f"An error occurred during file processing or data loading: {e}")
+                st.exception(e)
+                st.session_state.app_state = { # Reset app state on critical error
+                    'input_method': 'Upload ZIP File', 'zarr_root_path': '',
+                    'dat': None, 'zarr_store_obj': None, 'recording_ids': [],
+                    'selected_recording_id': None, 'system_type': None,
+                    'segment_keys': [], 'selected_segment_key': None,
+                    'plot_image_bytes': None, 'audio_file_path': None,
+                    'download_pulse_times': None, 'download_pulse_amplitudes': None,
+                    'download_pulse_parameters': None, 'temp_dir': None,
+                    'uploaded_file_name': None
+                }
+                st.stop()
         else:
-            st.session_state.app_state['segment_keys'] = []
-            st.session_state.app_state['selected_segment_key'] = None
-            st.error("No recording segments found in the 'rec' folder of the ZIP file.")
-        
-        # Ensure plot/download data is clear for new upload
-        st.session_state.app_state['plot_image_bytes'] = None
-        st.session_state.app_state['download_pulse_times'] = None
-        st.session_state.app_state['download_pulse_amplitudes'] = None
-        st.session_state.app_state['download_pulse_parameters'] = None
-        st.session_state.app_state['audio_file_path'] = None
-        
-        st.rerun() # Rerun to properly display data after initial upload processing
+            # On rerun of same file, rewind buffer to ensure consistency
+            uploaded_file.seek(0)
+            
+elif st.session_state.app_state['input_method'] == 'Load from Local Zarr Library':
+    st.session_state.app_state['zarr_root_path'] = st.text_input(
+        "Enter Path to Local Zarr Library (e.g., C:/path/to/ci_library.zarr):",
+        value=st.session_state.app_state['zarr_root_path'],
+        key='zarr_path_input'
+    )
 
-    except Exception as e:
-        st.error(f"An error occurred during file processing or data loading: {e}")
-        st.exception(e)
-        st.session_state.app_state.update({ 
-            'dat': None, 'system_type': None, 'segment_keys': [],
-            'selected_segment_key': None, 'plot_image_bytes': None,
-            'audio_file_path': None, 'download_pulse_times': None,
-            'download_pulse_amplitudes': None, 'download_pulse_parameters': None,
-            'temp_dir': None, 'uploaded_file_name': None
-        })
-        st.stop()
+    if st.session_state.app_state['zarr_root_path']:
+        if st.button("Load Zarr Library", key='load_zarr_button'):
+            try:
+                # Clear previous state from ZIP upload
+                st.session_state.app_state['dat'] = None
+                st.session_state.app_state['temp_dir'] = None
+                st.session_state.app_state['uploaded_file_name'] = None
 
+                # Open the root Zarr store
+                root_zarr = zarr.open_group(st.session_state.app_state['zarr_root_path'], mode='r')
+                st.session_state.app_state['zarr_store_obj'] = root_zarr
+                
+                # List all top-level groups (these are your recording IDs)
+                recording_ids = [key for key in root_zarr.keys() if isinstance(root_zarr[key], zarr.hierarchy.Group)]
+                st.session_state.app_state['recording_ids'] = recording_ids
+                
+                if recording_ids:
+                    # Set initial selected recording ID
+                    st.session_state.app_state['selected_recording_id'] = recording_ids[0]
+                    # System type can be detected from the recording ID name, or we might need metadata inside Zarr
+                    st.session_state.app_state['system_type'] = detect_system_type(recording_ids[0])
+                else:
+                    st.warning("No recording groups found in the specified Zarr library. Ensure structure is `root/recording_id/segments/`.")
+                    st.session_state.app_state['selected_recording_id'] = None
+                    st.session_state.app_state['recording_ids'] = []
+                
+                # Clear segment keys until a recording is selected
+                st.session_state.app_state['segment_keys'] = []
+                st.session_state.app_state['selected_segment_key'] = None
+                st.session_state.app_state['plot_image_bytes'] = None
+                st.session_state.app_state['audio_file_path'] = None
+                st.session_state.app_state['download_pulse_times'] = None
+                st.session_state.app_state['download_pulse_amplitudes'] = None
+                st.session_state.app_state['download_pulse_parameters'] = None
 
-# --- Display Content if Data is Loaded ---
-# This block executes if 'dat' is already populated in session_state (after initial upload processing or on rerun)
-if st.session_state.app_state['dat']:
+                st.success(f"Zarr library loaded from {st.session_state.app_state['zarr_root_path']}. Found {len(recording_ids)} recordings.")
+                st.rerun() # Rerun to display recording selector
+            except Exception as e:
+                st.error(f"Failed to load Zarr library from {st.session_state.app_state['zarr_root_path']}: {e}")
+                st.exception(e)
+                st.session_state.app_state['zarr_store_obj'] = None
+                st.session_state.app_state['recording_ids'] = []
+                st.session_state.app_state['selected_recording_id'] = None
+
+# --- Display Content if Data is Loaded (either from ZIP or Zarr) ---
+if st.session_state.app_state['dat'] or st.session_state.app_state['zarr_store_obj']:
     st.sidebar.header("Data & Analysis Options")
     st.sidebar.write(f"Detected System Type: **{st.session_state.app_state['system_type'].upper()}**")
 
-    # Metadata Section
-    with st.sidebar.expander("View Metadata (__info__)"):
-        info_data = st.session_state.app_state['dat'].get('__info__', {})
-        if info_data:
-            st.json(info_data)
-        else:
-            st.write("No '__info__' section found in the uploaded data.")
+    # Metadata Section (only for ZIP upload currently)
+    if st.session_state.app_state['dat'] and st.session_state.app_state['dat'].get('__info__'):
+        with st.sidebar.expander("View Metadata (__info__)"):
+            st.json(st.session_state.app_state['dat']['__info__'])
+    elif st.session_state.app_state['zarr_store_obj']:
+        with st.sidebar.expander("View Zarr Metadata"):
+            st.write(f"Root Zarr Store Keys: {list(st.session_state.app_state['zarr_store_obj'].keys())}")
+            st.write("Metadata for Zarr stores is typically embedded within `.zgroup` and `.zarray` files.")
+            st.info("Direct display of Zarr group metadata for root or recording group is not yet implemented, but you can inspect `dat['__info__']` if loaded from ZIP.")
 
-    # Segment Selection
+
+    # --- Recording ID Selection (if loading from Zarr) ---
+    current_recording_group = None
+    if st.session_state.app_state['input_method'] == 'Load from Local Zarr Library' and st.session_state.app_state['recording_ids']:
+        selected_recording_id_from_ui = st.sidebar.selectbox(
+            "Select a Recording ID:",
+            options=st.session_state.app_state['recording_ids'],
+            index=st.session_state.app_state['recording_ids'].index(st.session_state.app_state['selected_recording_id']) if st.session_state.app_state['selected_recording_id'] in st.session_state.app_state['recording_ids'] else 0,
+            key='recording_id_select'
+        )
+
+        if selected_recording_id_from_ui != st.session_state.app_state['selected_recording_id']:
+            st.session_state.app_state['selected_recording_id'] = selected_recording_id_from_ui
+            # Recalculate system type for new recording ID
+            st.session_state.app_state['system_type'] = detect_system_type(selected_recording_id_from_ui) 
+            # Clear segment keys and other data to force reload for new recording
+            st.session_state.app_state['segment_keys'] = []
+            st.session_state.app_state['selected_segment_key'] = None
+            st.session_state.app_state['plot_image_bytes'] = None
+            st.session_state.app_state['audio_file_path'] = None
+            st.session_state.app_state['download_pulse_times'] = None
+            st.session_state.app_state['download_pulse_amplitudes'] = None
+            st.session_state.app_state['download_pulse_parameters'] = None
+            st.rerun() # Rerun to load segments for new recording
+
+        # Get the current recording group
+        current_recording_group = st.session_state.app_state['zarr_store_obj'].get(st.session_state.app_state['selected_recording_id'])
+        if current_recording_group and 'segments' in current_recording_group:
+            st.session_state.app_state['segment_keys'] = list(current_recording_group['segments'].keys())
+            if st.session_state.app_state['selected_segment_key'] not in st.session_state.app_state['segment_keys']:
+                st.session_state.app_state['selected_segment_key'] = st.session_state.app_state['segment_keys'][0] if st.session_state.app_state['segment_keys'] else None
+        else:
+            st.warning(f"No 'segments' group found in recording '{st.session_state.app_state['selected_recording_id']}'. Check Zarr structure.")
+            st.session_state.app_state['segment_keys'] = []
+            st.session_state.app_state['selected_segment_key'] = None
+
+
+    # --- Segment Selection (common to both input methods) ---
     if st.session_state.app_state['segment_keys']:
         current_selected_index = 0
         if st.session_state.app_state['selected_segment_key'] in st.session_state.app_state['segment_keys']:
@@ -213,101 +323,155 @@ if st.session_state.app_state['dat']:
             current_segment_name = st.session_state.app_state['selected_segment_key']
             st.subheader(f"Segment: `{current_segment_name}`")
 
-            # Try to infer WAV file path for audio playback
-            extracted_data_root = os.path.join(st.session_state.app_state['temp_dir'], os.path.splitext(st.session_state.app_state['uploaded_file_name'])[0])
-            
-            potential_wav_file = os.path.join(extracted_data_root, f"{current_segment_name}.wav")
-            if os.path.exists(potential_wav_file):
-                st.session_state.app_state['audio_file_path'] = potential_wav_file
-            else:
-                potential_wav_file_flat = os.path.join(st.session_state.app_state['temp_dir'], f"{current_segment_name}.wav")
-                if os.path.exists(potential_wav_file_flat):
-                    st.session_state.app_state['audio_file_path'] = potential_wav_file_flat
+            # Determine where to get segment data and fs from (ZIP or Zarr)
+            segment_data = None
+            fs = None
+            if st.session_state.app_state['input_method'] == 'Upload ZIP File' and st.session_state.app_state['dat']:
+                segment_data = st.session_state.app_state['dat']['rec'][current_segment_name]
+                fs = st.session_state.app_state['dat'].get('__info__', {}).get('fs_scope') or st.session_state.app_state['dat'].get('__info__', {}).get('fs')
+                
+                # For ZIP, audio path is relative to temp_dir
+                extracted_data_root = os.path.join(st.session_state.app_state['temp_dir'], os.path.splitext(st.session_state.app_state['uploaded_file_name'])[0])
+                potential_wav_file = os.path.join(extracted_data_root, f"{current_segment_name}.wav")
+                if os.path.exists(potential_wav_file):
+                    st.session_state.app_state['audio_file_path'] = potential_wav_file
                 else:
-                    st.session_state.app_state['audio_file_path'] = None
-                    st.warning(f"Could not find audio file for segment '{current_segment_name}'. Looked in '{potential_wav_file}' and '{potential_wav_file_flat}'.")
+                    potential_wav_file_flat = os.path.join(st.session_state.app_state['temp_dir'], f"{current_segment_name}.wav")
+                    if os.path.exists(potential_wav_file_flat):
+                        st.session_state.app_state['audio_file_path'] = potential_wav_file_flat
+                    else:
+                        st.session_state.app_state['audio_file_path'] = None
+            
+            elif st.session_state.app_state['input_method'] == 'Load from Local Zarr Library' and current_recording_group:
+                # Load from Zarr
+                zarr_segment_group = current_recording_group['segments'].get(current_segment_name)
+                if zarr_segment_group:
+                    # For Zarr, pulse_times, pulse_amplitudes, pulse_parameters are directly Zarr arrays
+                    # Reconstruct the 'segment_data' structure for vectorizer if it needs it, or adjust vectorizer input.
+                    # Simpler: Load the arrays from Zarr directly and pass to plot_electrodogram
+                    pulse_times_channels_zarr = zarr_segment_group.get('pulse_times')
+                    pulse_amps_channels_zarr = zarr_segment_group.get('pulse_amplitudes')
+                    pulse_prms_channels_zarr = zarr_segment_group.get('pulse_parameters')
 
-            # Audio Playback
+                    if pulse_times_channels_zarr is None or pulse_amps_channels_zarr is None or pulse_prms_channels_zarr is None:
+                        st.error(f"Missing one or more Zarr arrays (pulse_times, pulse_amplitudes, pulse_parameters) for segment '{current_segment_name}'.")
+                        st.stop()
+
+                    # Convert Zarr arrays back to lists of NumPy arrays for plot_electrodogram and download
+                    # Need to handle potential NaN padding on load if the original was padded.
+                    
+                    # For plotting and download, we need the actual data as lists of 1D arrays
+                    # Zarr arrays loaded directly are usually 2D. We convert them to lists of 1D.
+                    pulse_times = [arr[~np.isnan(arr)] for arr in pulse_times_channels_zarr]
+                    pulse_amplitudes = [arr[~np.isnan(arr)] for arr in pulse_amps_channels_zarr]
+                    
+                    # For pulse_prms, they were stored as JSON strings. Deserialize them.
+                    pulse_parameters_deserialized = []
+                    for serialized_channel_prms in pulse_prms_channels_zarr:
+                        deserialized_channel_prms = []
+                        if isinstance(serialized_channel_prms, str): # Should be string if serialized
+                            try:
+                                deserialized_channel_prms.append(json.loads(serialized_channel_prms))
+                            except json.JSONDecodeError:
+                                deserialized_channel_prms.append(serialized_channel_prms) # Fallback if not valid JSON
+                        else: # If not string (e.g., if it's already an object array from an older save)
+                            deserialized_channel_prms.append(serialized_channel_prms)
+                        pulse_parameters_deserialized.append(deserialized_channel_prms)
+                        
+                    # Here, 'fs' is not stored in the segment group in Zarr.
+                    # It would ideally be stored in the recording group or root Zarr metadata.
+                    # For now, let's use a placeholder or assume it's constant if not available via metadata.
+                    # A more robust solution would retrieve fs from __info__ within the recording_id group in Zarr.
+                    # Assuming a default fs for now, or you need to process __info__ from Zarr too.
+                    # If `main_pipeline.py` stored `__info__` as a Zarr array/group, we could load it.
+                    # For simplicity of this update, let's assume `fs` needs to be provided externally
+                    # or hardcoded if not found in Zarr's metadata for recordings.
+                    # For the purpose of this example, we'll try to get it from the original `dat` if it was loaded,
+                    # otherwise, prompt the user or use a default.
+                    fs = st.session_state.app_state['dat'].get('__info__', {}).get('fs_scope') or st.session_state.app_state['dat'].get('__info__', {}).get('fs') if st.session_state.app_state['dat'] else 44100 # Default if no original ZIP load info
+
+                    # For Zarr load, X is not directly available, but we have pulse data
+                    # We skip re-vectorization and directly use loaded pulse data for plotting.
+                    pulse_times = pulse_times # Already converted above
+                    pulse_amplitudes = pulse_amplitudes # Already converted above
+                    pulse_prms = pulse_parameters_deserialized # Already converted above
+                    
+                    # Audio file path for Zarr loaded data is trickier unless stored in Zarr metadata
+                    # or inferred from a known local structure relative to the Zarr file.
+                    # For this example, we won't infer audio for Zarr-loaded data automatically.
+                    st.session_state.app_state['audio_file_path'] = None # Clear audio for Zarr load
+
+                else:
+                    st.error(f"Segment '{current_segment_name}' not found in the selected recording's segments group.")
+                    st.stop()
+            else: # Should not happen, but a safeguard
+                st.error("No data source (ZIP or Zarr) or selected segment found.")
+                st.stop()
+
+
+            if fs is None or fs == 0:
+                st.error("Sampling rate ('fs_scope' or 'fs') could not be determined. Cannot proceed with plotting/vectorization.")
+                st.stop()
+
+            st.write("#### Audio Playback")
             if st.session_state.app_state['audio_file_path']:
-                st.write("#### Audio Playback")
                 st.audio(st.session_state.app_state['audio_file_path'], format='audio/wav')
             else:
-                st.info("No audio file found for this segment.")
+                st.info("No audio file found or supported for this segment/source type (e.g., Zarr loaded data does not automatically infer WAV).")
 
             st.write("#### Electrodogram Visualization")
             # Process and Plot Electrodogram (only if not already cached)
             if st.session_state.app_state['plot_image_bytes'] is None:
                 
-                segment_data = st.session_state.app_state['dat']['rec'][current_segment_name]
-                if not isinstance(segment_data, dict) or not all(isinstance(v, np.ndarray) for v in segment_data.values()):
-                    st.error(f"Segment data for '{current_segment_name}' is not in the expected format (dictionary of numpy arrays).")
-                    st.stop()
-                
-                sorted_channel_keys = sorted(segment_data.keys(), key=lambda x: int(x) if x.isdigit() else x)
-                X_list = [segment_data[ch] for ch in sorted_channel_keys]
-                
-                max_len = max(len(arr) for arr in X_list)
-                X_padded = [np.pad(arr, (0, max_len - len(arr))) for arr in X_list]
-                X = np.array(X_padded)
-
-                fs = st.session_state.app_state['dat'].get('__info__', {}).get('fs_scope')
-                if fs is None:
-                    fs = st.session_state.app_state['dat'].get('__info__', {}).get('fs')
-                
-                if fs is None:
-                    st.error("Sampling rate ('fs_scope' or 'fs') could not be determined. Cannot proceed.")
+                # Check if pulse_times/amplitudes were generated/loaded successfully
+                if not pulse_times or not pulse_amplitudes:
+                    st.error("Pulse data could not be retrieved for plotting.")
                     st.stop()
 
-                with st.spinner(f"Vectorizing and plotting electrodogram for '{current_segment_name}'..."):
-                    vectorizer_instance = get_vectorizer(st.session_state.app_state['system_type'])
-                    pulse_times, pulse_amplitudes, pulse_prms = vectorizer_instance.vectorize(X, fs)
+                fig, ax = plt.subplots(figsize=(12, 6))
 
-                    fig, ax = plt.subplots(figsize=(12, 6))
-
-                    all_times_flat = np.concatenate(pulse_times) if pulse_times and any(len(t) > 0 for t in pulse_times) else np.array([])
-                    all_amplitudes_flat = np.concatenate(pulse_amplitudes) if pulse_amplitudes and any(len(a) > 0 for a in pulse_amplitudes) else np.array([])
-                    
-                    all_channels_flat = []
-                    if pulse_times:
-                        for i, t in enumerate(pulse_times):
-                            all_channels_flat.extend([i + 1] * len(t))
-                    all_channels_flat = np.array(all_channels_flat)
-
-                    if all_times_flat.size > 0:
-                        plot_electrodogram(
-                            ax=ax,
-                            pulse_times=all_times_flat,
-                            pulse_channels=all_channels_flat,
-                            pulse_amplitudes=all_amplitudes_flat,
-                            fs=fs,
-                            title=f"{current_segment_name} ({st.session_state.app_state['system_type'].replace('ab', 'Advanced Bionics').replace('cochlear', 'Cochlear')}): Vectorized Electrodogram",
-                            reverse_channels=(st.session_state.app_state['system_type'] == "cochlear")
-                        )
-                    else:
-                        ax.set_title(f"Vectorized Electrodogram: {current_segment_name} (No Pulses Found)")
-                        ax.set_xlabel('Time (s)')
-                        ax.set_ylabel('Channel')
-
-                    # Save figure to bytes for display and download
-                    buf = io.BytesIO()
-                    fig.savefig(buf, format="png", bbox_inches='tight')
-                    buf.seek(0)
-                    st.session_state.app_state['plot_image_bytes'] = buf.getvalue()
-                    plt.close(fig) # Close the figure to free memory
-
-                    # Store data arrays for download
-                    st.session_state.app_state['download_pulse_times'] = pulse_times # Store as list of arrays
-                    st.session_state.app_state['download_pulse_amplitudes'] = pulse_amplitudes # Store as list of arrays
-                    st.session_state.app_state['download_pulse_parameters'] = pulse_prms # Store as list of objects/dicts
+                all_times_flat = np.concatenate(pulse_times) if pulse_times and any(len(t) > 0 for t in pulse_times) else np.array([])
+                all_amplitudes_flat = np.concatenate(pulse_amplitudes) if pulse_amplitudes and any(len(a) > 0 for a in pulse_amplitudes) else np.array([])
                 
-                st.image(st.session_state.app_state['plot_image_bytes']) # Display the generated image
+                all_channels_flat = []
+                if pulse_times:
+                    for i, t in enumerate(pulse_times):
+                        all_channels_flat.extend([i + 1] * len(t))
+                all_channels_flat = np.array(all_channels_flat)
+
+                if all_times_flat.size > 0:
+                    plot_electrodogram(
+                        ax=ax,
+                        pulse_times=all_times_flat,
+                        pulse_channels=all_channels_flat,
+                        pulse_amplitudes=all_amplitudes_flat,
+                        fs=fs,
+                        title=f"{current_segment_name} ({st.session_state.app_state['system_type'].replace('ab', 'Advanced Bionics').replace('cochlear', 'Cochlear')}): Vectorized Electrodogram",
+                        reverse_channels=(st.session_state.app_state['system_type'] == "cochlear")
+                    )
+                else:
+                    ax.set_title(f"Vectorized Electrodogram: {current_segment_name} (No Pulses Found)")
+                    ax.set_xlabel('Time (s)')
+                    ax.set_ylabel('Channel')
+
+                buf = io.BytesIO()
+                fig.savefig(buf, format="png", bbox_inches='tight')
+                buf.seek(0)
+                st.session_state.app_state['plot_image_bytes'] = buf.getvalue()
+                plt.close(fig)
+
+                # Store data arrays for download regardless of source (ZIP or Zarr)
+                st.session_state.app_state['download_pulse_times'] = pulse_times # As list of arrays
+                st.session_state.app_state['download_pulse_amplitudes'] = pulse_amplitudes # As list of arrays
+                st.session_state.app_state['download_pulse_parameters'] = pulse_prms # As list of deserialized objects/dicts
+                
+                st.image(st.session_state.app_state['plot_image_bytes'])
                 st.success("Electrodogram generated successfully!")
             else:
-                # If cached, just display it
                 st.image(st.session_state.app_state['plot_image_bytes'])
                 st.info("Electrodogram loaded from cache.")
             
-            # Display Download Buttons for Electrodogram and Data Arrays
+            # Display Download Buttons for Electrodogram and Data Arrays (common to both input methods)
             st.write("#### Download Processed Data")
             col1, col2, col3, col4 = st.columns(4)
 
@@ -325,7 +489,7 @@ if st.session_state.app_state['dat']:
 
             with col2:
                 if st.session_state.app_state['download_pulse_times'] is not None:
-                    # Pad to the max length of any individual channel's pulses
+                    # Pad to the max length of any individual channel's pulses for NPY download
                     current_max_pulse_len = 0
                     if st.session_state.app_state['download_pulse_times'] and any(len(arr) > 0 for arr in st.session_state.app_state['download_pulse_times']):
                         current_max_pulse_len = max(len(arr) for arr in st.session_state.app_state['download_pulse_times'])
@@ -369,12 +533,15 @@ if st.session_state.app_state['dat']:
             with col4:
                 if st.session_state.app_state['download_pulse_parameters'] is not None:
                     all_prms_flat = []
+                    # Ensure download_pulse_parameters is a list of lists (from vectorizer output)
+                    # and each inner list contains deserialized JSON objects
                     for channel_prms in st.session_state.app_state['download_pulse_parameters']:
-                        if isinstance(channel_prms, list):
+                        if isinstance(channel_prms, list): # Expected if it's the output of vectorizer.vectorize
                             all_prms_flat.extend(channel_prms)
-                        else:
+                        else: # Fallback for single item or unexpected structure
                             all_prms_flat.append(channel_prms)
 
+                    # Serialize the (potentially mixed) objects to JSON for download
                     prms_json_str = json.dumps(all_prms_flat, indent=4, default=str)
                     
                     prms_buf = io.BytesIO(prms_json_str.encode('utf-8'))
@@ -388,8 +555,7 @@ if st.session_state.app_state['dat']:
                 else:
                     st.info("Pulse parameters not available.")
     else:
-        st.info("Please select a segment from the sidebar to begin processing and visualization.")
+        st.info("Please select a recording and segment to begin processing and visualization.")
 else:
-    # This message is displayed when no file is uploaded yet (initial state)
-    st.info("Upload a ZIP file to begin processing and visualization.")
+    st.info("Select an input method above and provide a ZIP file or Zarr library path to begin.")
 
