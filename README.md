@@ -67,7 +67,7 @@ pip install -r requirements.txt
 # 1. Run the processing pipeline manually:
 
 python src/ci_processor/main_pipeline.py \
-  --input_path "path/to/your.zip" \
+  --input_path "path/to/your dataset" \
   --output "output/ci_library.zarr"
 Supports .zip, _rec_ folders, or .dat directly.
 
